@@ -50,7 +50,7 @@ func withClientTimeout(timeout time.Duration) Option {
 	}
 }
 
-func CreateController(ctx context.Context, endpoint string, token string, opts ...Option) (*Controller, error) {
+func CreateController(ctx context.Context, endpoint string, token string, stewardFactory func(Chat) ChatSteward, opts ...Option) (*Controller, error) {
 	p := options{
 		tickInterval: 1 * time.Second,
 	}
@@ -68,6 +68,7 @@ func CreateController(ctx context.Context, endpoint string, token string, opts .
 		client: &http.Client{
 			Timeout: time.Second,
 		},
+		stewardFactory: stewardFactory,
 	}, nil
 }
 
