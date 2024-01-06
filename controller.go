@@ -8,12 +8,13 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"time"
 )
 
 type update struct {
-	ID      int32   `json:"id"`
+	ID      int32   `json:"update_id"`
 	Message Message `json:"message"`
 }
 
@@ -22,13 +23,14 @@ type ChatSteward interface {
 }
 
 type Controller struct {
-	pipes          map[ChatID]chatPipe
+	pipes          map[ChatID]*chatPipe
 	ctx            context.Context
 	ticker         *time.Ticker
 	stewardFactory func(Chat) ChatSteward
 	endpoint       string
 	botPrefix      string
 	client         *http.Client
+	lastUpdateID   int32
 }
 
 type options struct {
@@ -60,25 +62,36 @@ func CreateController(ctx context.Context, endpoint string, token string, stewar
 	}
 
 	return &Controller{
-		pipes:     make(map[ChatID]chatPipe),
+		pipes:     make(map[ChatID]*chatPipe),
 		ctx:       ctx,
 		ticker:    time.NewTicker(p.tickInterval),
 		endpoint:  endpoint,
 		botPrefix: "bot" + token,
 		client: &http.Client{
-			Timeout: time.Second,
+			Timeout: 10 * time.Second,
 		},
 		stewardFactory: stewardFactory,
 	}, nil
 }
 
-func sendRequest[T any](c *Controller, method string) (*T, error) {
+func sendRequest[T any](c *Controller, method string, params map[string]string) (*T, error) {
 	finalURL, err := url.JoinPath(c.endpoint, c.botPrefix, method)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := c.client.Get(finalURL)
+	req, err := http.NewRequest(http.MethodGet, finalURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	reqParams := req.URL.Query()
+	for k, v := range params {
+		reqParams.Set(k, v)
+	}
+	req.URL.RawQuery = reqParams.Encode()
+
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -92,19 +105,22 @@ func sendRequest[T any](c *Controller, method string) (*T, error) {
 		return nil, fmt.Errorf("not successful code from telegram API on method %s (%d): %s", method, resp.StatusCode, string(body))
 	}
 
-	var res T
+	var res struct {
+		Result T `json:"result"`
+	}
 	if err := json.Unmarshal(body, &res); err != nil {
 		return nil, err
 	}
 
-	return &res, nil
+	return &res.Result, nil
 }
 
 func (c *Controller) getUpdates() ([]update, error) {
-	updates, err := sendRequest[[]update](c, "getUpdates")
+	updates, err := sendRequest[[]update](c, "getUpdates", map[string]string{"offset": strconv.Itoa(int(c.lastUpdateID + 1))})
 	if err != nil {
 		return nil, err
 	}
+
 	if updates == nil {
 		return nil, fmt.Errorf("got nil for updates without an error")
 	}
@@ -121,9 +137,13 @@ func (c *Controller) Start() {
 				break
 			}
 			for _, upd := range updates {
+				if upd.ID > c.lastUpdateID {
+					c.lastUpdateID = upd.ID
+				}
+
 				pipe, ok := c.pipes[upd.Message.Chat.ID]
 				if !ok {
-					pipe = chatPipe{
+					pipe = &chatPipe{
 						steward: c.stewardFactory(upd.Message.Chat),
 						updates: []update{},
 						mx:      &sync.Mutex{},
